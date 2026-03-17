@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebHID 最小 Demo - 鼠标配置前期验证</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 1rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.25rem; }
+    .buttons { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 1rem 0; }
+    button { padding: 0.5rem 1rem; cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    #log { background: #f5f5f5; border: 1px solid #ddd; padding: 0.75rem; font-family: monospace; font-size: 0.85rem; white-space: pre-wrap; word-break: break-all; min-height: 200px; max-height: 400px; overflow-y: auto; }
+    .status { margin-bottom: 0.5rem; color: #666; }
+  </style>
+</head>
+<body>
+  <h1>WebHID 最小 Demo</h1>
+  <p class="status" id="status">未连接。请使用 Chrome/Edge，并在 HTTPS 或 localhost 下打开。</p>
+  <div class="buttons">
+    <button id="btnSelect">选择设备</button>
+    <button id="btnSend" disabled>发送 Report</button>
+  </div>
+  <section class="read-cmd" style="margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #eee;">
+    <h2 style="font-size: 1rem; margin-bottom: 0.5rem;">读命令（测试接收数据）</h2>
+    <p style="font-size: 0.85rem; color: #666; margin-bottom: 0.5rem;">与 PC 端一致的读帧，发送后设备响应会显示在下方日志。协议写使用 Report ID 0xFB。</p>
+    <div class="buttons" style="align-items: center;">
+      <button id="btnReadMouseInfo" disabled>读鼠标信息 (0x03+0x01)</button>
+    </div>
+    <div class="buttons" style="align-items: center; margin-top: 0.5rem;">
+      <label>reportId: <input type="number" id="inputReportId" value="251" min="0" max="255" style="width: 4rem; padding: 0.25rem;" title="协议写为 0xFB(251)"></label>
+      <label>预设: <select id="selectPreset"><option value="">-- 选择 --</option><option value="example1">示例帧1 (AA 01 03 00 55)</option><option value="example2">示例帧2 (AA 02 03 01 00 55)</option></select></label>
+      <button id="btnSendRead" disabled>发送读命令</button>
+    </div>
+    <div style="margin-top: 0.5rem;">
+      <label>自定义十六进制: <input type="text" id="inputCustomHex" placeholder="AA 01 03 00 55 或 AA01030055" style="width: 100%; max-width: 320px; padding: 0.35rem; font-family: monospace;"></label>
+    </div>
+  </section>
+  <p>接收到的 Report 会通过 <code>inputreport</code> 事件自动显示在下方日志中。</p>
+  <div id="log"></div>
+
+  <script>
+    const filters = [
+      { vendorId: 3554, productId: 64523 },
+      { vendorId: 2367, productId: 9303 },
+      { vendorId: 1155 }
+    ];
+
+    let device = null;
+    const logEl = document.getElementById('log');
+    const statusEl = document.getElementById('status');
+    const btnSelect = document.getElementById('btnSelect');
+    const btnSend = document.getElementById('btnSend');
+    const btnSendRead = document.getElementById('btnSendRead');
+    const btnReadMouseInfo = document.getElementById('btnReadMouseInfo');
+    const inputReportId = document.getElementById('inputReportId');
+    const selectPreset = document.getElementById('selectPreset');
+    const inputCustomHex = document.getElementById('inputCustomHex');
+
+    // CRC8: x^8+x^2+x+1 (poly 0x07), init 0x00，与 PC 端 McDeviceMsgAssemble 一致
+    const CHECKSUM_TABLE = (() => {
+      const t = new Uint8Array(256);
+      for (let i = 0; i < 256; i++) {
+        let c = i;
+        for (let j = 0; j < 8; j++) c = (c & 0x80) ? ((c << 1) ^ 0x07) & 0xFF : (c << 1) & 0xFF;
+        t[i] = c;
+      }
+      return t;
+    })();
+    function crc8(data, offset, len) {
+      let r = 0;
+      for (let i = 0; i < len; i++) r = CHECKSUM_TABLE[(r ^ (data[offset + i] & 0xFF)) & 0xFF];
+      return r & 0xFF;
+    }
+
+    /** 组帧：读鼠标信息 Command=0x03, Control=0x01, data 11 字节 [0x01 + 10*0]，含 CRC、End */
+    function buildReadMouseInfoFrame() {
+      const control = 0x01;
+      const dataFrame = new Uint8Array([0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // 11 bytes
+      const controlAndData = new Uint8Array(1 + dataFrame.length);
+      controlAndData[0] = control;
+      controlAndData.set(dataFrame, 1);
+      const len = controlAndData.length; // 12
+      const crc = crc8(controlAndData, 0, len);
+      return new Uint8Array([
+        0xAA, 0x03, (len >> 8) & 0xFF, len & 0xFF,
+        control, ...dataFrame,
+        0, crc, 0x55
+      ]);
+    }
+
+    /** 从设备响应 buffer 中解析并打印鼠标信息（control 0x01） */
+    function tryParseMouseInfoResponse(buf) {
+      const arr = new Uint8Array(buf);
+      for (let i = 0; i + 5 <= arr.length; i++) {
+        if (arr[i] === 0xFA && arr[i + 1] === 0xAA && arr[i + 2] === 0x70) {
+          const len = (arr[i + 3] << 8) | arr[i + 4];
+          if (len < 1 || i + 5 + len > arr.length) continue;
+          const control = arr[i + 5];
+          if (control !== 0x01) continue;
+          const payload = arr.slice(i + 5, i + 5 + len);
+          if (payload.length < 7) continue;
+          const dpiMax = (payload[1] << 8) | payload[2];
+          const buttons = (payload[3] << 8) | payload[4];
+          const functions = (payload[5] << 8) | payload[6];
+          log('  [解析] 鼠标信息: dpiMax=' + dpiMax + ', buttons=' + buttons + ', functions=' + functions);
+          return;
+        }
+      }
+      if (arr.length >= 3 && arr[2] === 0x70) {
+        const len = (arr[3] << 8) | arr[4];
+        if (len >= 7 && 5 + len <= arr.length && arr[5] === 0x01) {
+          const p = arr.slice(5, 5 + len);
+          const dpiMax = (p[1] << 8) | p[2];
+          const buttons = (p[3] << 8) | p[4];
+          const functions = (p[5] << 8) | p[6];
+          log('  [解析] 鼠标信息: dpiMax=' + dpiMax + ', buttons=' + buttons + ', functions=' + functions);
+        }
+      }
+    }
+
+    const PRESET_BYTES = {
+      example1: [0xAA, 0x01, 0x03, 0x00, 0x55],
+      example2: [0xAA, 0x02, 0x03, 0x01, 0x00, 0x55]
+    };
+
+    function parseHexString(str) {
+      if (!str || !String(str).trim()) return null;
+      const s = String(str).replace(/\s|,/g, '').replace(/0x/gi, '');
+      if (!/^[0-9a-fA-F]+$/.test(s) || s.length % 2 !== 0) return null;
+      const arr = [];
+      for (let i = 0; i < s.length; i += 2) arr.push(parseInt(s.slice(i, i + 2), 16));
+      return arr;
+    }
+
+    function log(msg) {
+      const line = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+      logEl.textContent += line + '\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
+
+    function setConnected(connected) {
+      btnSend.disabled = !connected;
+      btnSendRead.disabled = !connected;
+      btnReadMouseInfo.disabled = !connected;
+      if (!connected) device = null;
+    }
+
+    if (!navigator.hid) {
+      setStatus('当前浏览器不支持 WebHID，请使用 Chrome 或 Edge。');
+      log('navigator.hid 不可用');
+    }
+
+    btnSelect.addEventListener('click', async () => {
+      if (!navigator.hid) return;
+      try {
+        log('请求设备（需用户手势）...');
+        const devices = await navigator.hid.requestDevice({ filters });
+        if (!devices.length) {
+          log('未选择任何设备');
+          return;
+        }
+        device = devices[0];
+        log('已选择: ' + (device.productName || 'VID=' + device.vendorId + ' PID=' + device.productId));
+
+        if (!device.opened) {
+          await device.open();
+          log('设备已打开');
+        }
+
+        device.addEventListener('inputreport', (e) => {
+          const id = e.reportId;
+          const data = new Uint8Array(e.data.buffer, e.data.byteOffset, e.data.byteLength);
+          const hex = Array.from(data).map(b => ('0' + b.toString(16)).slice(-2)).join(' ');
+          log('收到 Report: reportId=' + id + ', 长度=' + data.length + ', 数据=' + hex);
+          tryParseMouseInfoResponse(e.data.buffer);
+        });
+
+        setStatus('已连接: ' + (device.productName || device.vendorId + '/' + device.productId));
+        setConnected(true);
+      } catch (err) {
+        log('错误: ' + err.message);
+        setStatus('连接失败: ' + err.message);
+        setConnected(false);
+      }
+    });
+
+    btnSend.addEventListener('click', async () => {
+      if (!device || !device.opened) return;
+      const reportId = Number(inputReportId.value) || 0;
+      const data = new Uint8Array([0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]);
+      try {
+        await device.sendReport(reportId, data);
+        const hex = Array.from(data).map(b => ('0' + b.toString(16)).slice(-2)).join(' ');
+        log('已发送 Report: reportId=' + reportId + ', 数据=' + hex);
+      } catch (err) {
+        log('发送失败: ' + err.message);
+      }
+    });
+
+    btnReadMouseInfo.addEventListener('click', async () => {
+      if (!device || !device.opened) return;
+      const REPORT_ID_WRITE = 0xFB;
+      const frame = buildReadMouseInfoFrame();
+      try {
+        await device.sendReport(REPORT_ID_WRITE, frame);
+        const hex = Array.from(frame).map(b => ('0' + b.toString(16)).slice(-2)).join(' ');
+        log('已发送 读鼠标信息: reportId=0xFB, 帧=' + hex);
+      } catch (err) {
+        log('发送读鼠标信息失败: ' + err.message);
+      }
+    });
+
+    btnSendRead.addEventListener('click', async () => {
+      if (!device || !device.opened) return;
+      const reportId = Math.max(0, Math.min(255, Number(inputReportId.value) || 0));
+      let bytes = null;
+      const presetId = selectPreset.value;
+      if (presetId && PRESET_BYTES[presetId]) {
+        bytes = PRESET_BYTES[presetId];
+      }
+      if (bytes === null) {
+        const custom = parseHexString(inputCustomHex.value);
+        if (custom && custom.length) bytes = custom;
+      }
+      if (!bytes || !bytes.length) {
+        log('请选择预设读命令或填写自定义十六进制');
+        return;
+      }
+      const data = new Uint8Array(bytes);
+      try {
+        await device.sendReport(reportId, data);
+        const hex = Array.from(data).map(b => ('0' + b.toString(16)).slice(-2)).join(' ');
+        log('已发送读命令: reportId=' + reportId + ', 数据=' + hex);
+      } catch (err) {
+        log('发送读命令失败: ' + err.message);
+      }
+    });
+  </script>
+</body>
+</html>
