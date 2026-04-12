@@ -2,7 +2,7 @@
 
 GitHub Pages 站点：**https://yougaohui.github.io/WebHid/**
 
-由 [`mouse-web`](https://github.com/yougaohui/mouse-web) 使用 **`npm run build:debug:gh-pages`** 构建（仅协议调试页，`base=/WebHid/`），将 `dist/` 同步到本仓库根目录后推送；`push` 到 `main` 会触发 [`.github/workflows/static.yml`](.github/workflows/static.yml) 部署 Pages。
+由主工程 **mouse-web** 使用 **`npm run build:debug:gh-pages`** 构建（仅协议调试页，`base=/WebHid/`），将 `dist/` 同步到本仓库根目录后推送；`push` 到 `main` 会触发 [`.github/workflows/static.yml`](.github/workflows/static.yml) 部署 Pages。
 
 ## 浏览器
 
