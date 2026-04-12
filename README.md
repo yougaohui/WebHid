@@ -2,7 +2,7 @@
 
 GitHub Pages 站点：**https://yougaohui.github.io/WebHid/**
 
-由主工程 **mouse-web** 使用 **`npm run build:debug:gh-pages`** 构建（仅协议调试页，`base=/WebHid/`），将 `dist/` 同步到本仓库根目录后推送；`push` 到 `main` 会触发 [`.github/workflows/static.yml`](.github/workflows/static.yml) 部署 Pages。
+由主工程 **mouse-web** 在同级目录执行 **`npm run deploy:webhid`**（等价于 `build:debug:gh-pages` + 将 `dist/` 同步到本仓库根目录），再在本仓库 **提交并推送**；`push` 到 `main` 会触发 [`.github/workflows/static.yml`](.github/workflows/static.yml) 部署 Pages。
 
 ## 浏览器
 
@@ -13,7 +13,7 @@ GitHub Pages 站点：**https://yougaohui.github.io/WebHid/**
 
 ```bash
 cd /path/to/mouse-web
-npm run build:debug:gh-pages
+npm run deploy:webhid   # 可选：仅预览时再执行下面一行
 npm run preview:debug:gh-pages
 ```
 
@@ -21,4 +21,4 @@ npm run preview:debug:gh-pages
 
 ## 更新本仓库静态文件
 
-在 `mouse-web` 目录执行 `npm run build:debug:gh-pages`，将生成的 **`dist/` 内全部内容** 覆盖到本仓库根目录，提交并推送 `main`。
+在 **`mouse-web` 仓库根目录**执行 **`npm run deploy:webhid`**，然后在本仓库（`WebHid`）里 `git add` / `commit` / `push` 到 `main`。
